@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Real-time Chat Client</title>
+    <script src="/socket.io/socket.io.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+        .container { border: 1px solid #ddd; border-radius: 8px; padding: 20px; margin: 10px 0; }
+        .messages { height: 300px; overflow-y: auto; border: 1px solid #eee; padding: 10px; margin: 10px 0; }
+        .message { margin: 5px 0; padding: 8px; border-radius: 4px; }
+        .message.sent { background-color: #dcf8c6; text-align: right; }
+        .message.received { background-color: #f1f1f1; }
+        .status { font-size: 0.8em; color: #666; }
+        .typing { font-style: italic; color: #999; }
+        .online-users { background-color: #e8f5e8; }
+        input, button { margin: 5px; padding: 8px; }
+        .error { color: red; }
+        .success { color: green; }
+        .info { color: blue; }
+    </style>
+</head>
+<body>
+    <h1>Real-time Chat Client</h1>
+    
+    <!-- Authentication Section -->
+    <div class="container">
+        <h3>Authentication</h3>
+        <input type="text" id="jwtToken" placeholder="Enter JWT Token" style="width: 400px;">
+        <button onclick="authenticate()">Connect</button>
+        <button onclick="disconnect()">Disconnect</button>
+        <div id="authStatus" class="status"></div>
+    </div>
+
+    <!-- Online Users -->
+    <div class="container">
+        <h3>Online Users</h3>
+        <button onclick="getOnlineUsers()">Refresh Online Users</button>
+        <div id="onlineUsers" class="online-users"></div>
+    </div>
+
+    <!-- Messaging Section -->
+    <div class="container">
+        <h3>Send Message</h3>
+        <input type="text" id="receiverId" placeholder="Receiver User ID">
+        <input type="text" id="messageContent" placeholder="Message content" style="width: 300px;">
+        <select id="messageType">
+            <option value="text">Text</option>
+            <option value="image">Image</option>
+            <option value="file">File</option>
+        </select>
+        <button onclick="sendMessage()">Send</button>
+        <br>
+        <input type="text" id="replyToId" placeholder="Reply to Message ID (optional)" style="width: 300px;">
+    </div>
+
+    <!-- Messages Display -->
+    <div class="container">
+        <h3>Messages</h3>
+        <div id="messages" class="messages"></div>
+        <div id="typingIndicator" class="typing"></div>
+    </div>
+
+    <!-- Message Actions -->
+    <div class="container">
+        <h3>Message Actions</h3>
+        <input type="text" id="markReadMessageId" placeholder="Message ID to mark as read">
+        <button onclick="markMessageRead()">Mark Message Read</button>
+        <br>
+        <input type="text" id="markReadSenderId" placeholder="Sender ID to mark all messages read">
+        <button onclick="markConversationRead()">Mark All from Sender Read</button>
+    </div>
+
+    <!-- Typing Indicators -->
+    <div class="container">
+        <h3>Typing Indicators</h3>
+        <input type="text" id="typingReceiverId" placeholder="Receiver ID for typing">
+        <button onclick="startTyping()">Start Typing</button>
+        <button onclick="stopTyping()">Stop Typing</button>
+    </div>
+
+    <!-- Status -->
+    <div class="container">
+        <h3>Status</h3>
+        <div id="eventLog" style="height: 200px; overflow-y: auto; background-color: #f9f9f9; padding: 10px;"></div>
+    </div>
+
+    <script>
+        let socket = null;
+        let currentUserId = null;
+
+        function log(message, type = 'info') {
+            const eventLog = document.getElementById('eventLog');
+            const timestamp = new Date().toLocaleTimeString();
+            const className = type === 'error' ? 'error' : type === 'success' ? 'success' : 'info';
+            eventLog.innerHTML += `<div class="${className}">[${timestamp}] ${message}</div>`;
+            eventLog.scrollTop = eventLog.scrollHeight;
+            console.log(`[${type.toUpperCase()}] ${message}`);
+        }
+
+        function authenticate() {
+            const token = document.getElementById('jwtToken').value;
+            if (!token) {
+                log('Please enter a JWT token', 'error');
+                return;
+            }
+
+            // Initialize socket connection
+            socket = io('http://localhost:3000');
+            
+            // Connection event
+            socket.on('connect', () => {
+                log('Connected to server', 'success');
+                socket.emit('authenticate', token);
+            });
+
+            // Authentication events
+            socket.on('authenticated', (data) => {
+                currentUserId = data.user._id;
+                document.getElementById('authStatus').innerHTML = 
+                    `<span class="success">Authenticated as: ${data.user.name} (${data.user._id})</span>`;
+                log(`Authenticated as ${data.user.name}`, 'success');
+                getOnlineUsers();
+            });
+
+            socket.on('authentication_error', (data) => {
+                log(`Authentication failed: ${data.message}`, 'error');
+                document.getElementById('authStatus').innerHTML = 
+                    `<span class="error">Authentication failed: ${data.message}</span>`;
+            });
+
+            // Message events
+            socket.on('message:new', (data) => {
+                displayMessage(data, 'received');
+                log(`New message from ${data.senderId.name}: ${data.content}`, 'info');
+            });
+
+            socket.on('message:sent', (data) => {
+                displayMessage(data, 'sent');
+                log(`Message sent successfully (${data.status})`, 'success');
+            });
+
+            socket.on('message:error', (data) => {
+                log(`Message error: ${data.message}`, 'error');
+            });
+
+            socket.on('message:read_receipt', (data) => {
+                log(`Message read by ${data.readByName} at ${new Date(data.readAt).toLocaleTimeString()}`, 'info');
+                updateMessageStatus(data.messageId, 'read');
+            });
+
+            socket.on('conversation:read', (data) => {
+                log(`${data.messagesCount} messages marked as read by ${data.readByName}`, 'info');
+            });
+
+            // Typing events
+            socket.on('typing:start', (data) => {
+                document.getElementById('typingIndicator').innerHTML = 
+                    `${data.userName} is typing...`;
+                log(`${data.userName} started typing`, 'info');
+            });
+
+            socket.on('typing:stop', (data) => {
+                document.getElementById('typingIndicator').innerHTML = '';
+                log(`${data.userName} stopped typing`, 'info');
+            });
+
+            // User status events
+            socket.on('user:online', (data) => {
+                log(`${data.name} came online`, 'info');
+                getOnlineUsers();
+            });
+
+            socket.on('user:offline', (data) => {
+                log(`${data.name} went offline`, 'info');
+                getOnlineUsers();
+            });
+
+            socket.on('users:online_list', (data) => {
+                displayOnlineUsers(data.users);
+                log(`${data.count} users online`, 'info');
+            });
+
+            // Error events
+            socket.on('error', (data) => {
+                log(`Socket error: ${data.message}`, 'error');
+            });
+
+            socket.on('disconnect', (reason) => {
+                log(`Disconnected: ${reason}`, 'error');
+                document.getElementById('authStatus').innerHTML = 
+                    `<span class="error">Disconnected: ${reason}</span>`;
+            });
+        }
+
+        function disconnect() {
+            if (socket) {
+                socket.disconnect();
+                socket = null;
+                currentUserId = null;
+                document.getElementById('authStatus').innerHTML = 
+                    '<span class="error">Disconnected</span>';
+                log('Disconnected from server', 'info');
+            }
+        }
+
+        function sendMessage() {
+            if (!socket || !currentUserId) {
+                log('Not connected or authenticated', 'error');
+                return;
+            }
+
+            const receiverId = document.getElementById('receiverId').value;
+            const content = document.getElementById('messageContent').value;
+            const messageType = document.getElementById('messageType').value;
+            const replyTo = document.getElementById('replyToId').value || null;
+
+            if (!receiverId || !content) {
+                log('Receiver ID and content are required', 'error');
+                return;
+            }
+
+            const messageData = {
+                receiverId,
+                content,
+                messageType,
+                replyTo
+            };
+
+            socket.emit('message:send', messageData);
+            document.getElementById('messageContent').value = '';
+            document.getElementById('replyToId').value = '';
+        }
+
+        function markMessageRead() {
+            if (!socket || !currentUserId) {
+                log('Not connected or authenticated', 'error');
+                return;
+            }
+
+            const messageId = document.getElementById('markReadMessageId').value;
+            if (!messageId) {
+                log('Message ID is required', 'error');
+                return;
+            }
+
+            socket.emit('message:read', { messageId });
+            document.getElementById('markReadMessageId').value = '';
+        }
+
+        function markConversationRead() {
+            if (!socket || !currentUserId) {
+                log('Not connected or authenticated', 'error');
+                return;
+            }
+
+            const senderId = document.getElementById('markReadSenderId').value;
+            if (!senderId) {
+                log('Sender ID is required', 'error');
+                return;
+            }
+
+            socket.emit('message:read', { senderId });
+            document.getElementById('markReadSenderId').value = '';
+        }
+
+        function startTyping() {
+            if (!socket || !currentUserId) {
+                log('Not connected or authenticated', 'error');
+                return;
+            }
+
+            const receiverId = document.getElementById('typingReceiverId').value;
+            if (!receiverId) {
+                log('Receiver ID is required', 'error');
+                return;
+            }
+
+            socket.emit('typing:start', { receiverId });
+        }
+
+        function stopTyping() {
+            if (!socket || !currentUserId) {
+                log('Not connected or authenticated', 'error');
+                return;
+            }
+
+            const receiverId = document.getElementById('typingReceiverId').value;
+            if (!receiverId) {
+                log('Receiver ID is required', 'error');
+                return;
+            }
+
+            socket.emit('typing:stop', { receiverId });
+        }
+
+        function getOnlineUsers() {
+            if (socket && currentUserId) {
+                socket.emit('users:get_online');
+            }
+        }
+
+        function displayMessage(message, type) {
+            const messagesDiv = document.getElementById('messages');
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${type}`;
+            messageDiv.id = `msg_${message._id}`;
+            
+            const senderName = type === 'sent' ? 'You' : message.senderId.name;
+            const timestamp = new Date(message.createdAt).toLocaleTimeString();
+            
+            messageDiv.innerHTML = `
+                <div><strong>${senderName}</strong> <span class="status">${timestamp}</span></div>
+                <div>${message.content}</div>
+                <div class="status">Status: ${message.status} | ID: ${message._id}</div>
+            `;
+            
+            messagesDiv.appendChild(messageDiv);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        }
+
+        function updateMessageStatus(messageId, status) {
+            const messageDiv = document.getElementById(`msg_${messageId}`);
+            if (messageDiv) {
+                const statusSpan = messageDiv.querySelector('.status');
+                if (statusSpan) {
+                    statusSpan.innerHTML = statusSpan.innerHTML.replace(/Status: \w+/, `Status: ${status}`);
+                }
+            }
+        }
+
+        function displayOnlineUsers(users) {
+            const onlineUsersDiv = document.getElementById('onlineUsers');
+            onlineUsersDiv.innerHTML = users.map(user => 
+                `<div>
+                    <strong>${user.name}</strong> (${user.id})
+                    ${user.isCurrentUser ? ' <em>(You)</em>' : ''}
+                    <button onclick="document.getElementById('receiverId').value='${user.id}'; document.getElementById('typingReceiverId').value='${user.id}';">
+                        Select as Receiver
+                    </button>
+                </div>`
+            ).join('');
+        }
+
+        // Auto-clear typing indicator after 3 seconds
+        let typingTimeout;
+        document.getElementById('messageContent').addEventListener('input', () => {
+            if (socket && currentUserId) {
+                const receiverId = document.getElementById('receiverId').value;
+                if (receiverId) {
+                    socket.emit('typing:start', { receiverId });
+                    clearTimeout(typingTimeout);
+                    typingTimeout = setTimeout(() => {
+                        socket.emit('typing:stop', { receiverId });
+                    }, 3000);
+                }
+            }
+        });
+    </script>
+</body>
+</html>
