@@ -60,7 +60,7 @@ Edit `.env` with your configuration:
 ```env
 # Database
 MONGODB_URI=mongodb://localhost:27017/pingme
-# For MongoDB Atlas: mongodb+srv://username:password@cluster.mongodb.net/pingme
+# For MongoDB Atlas: mongodb+srv://<username>:<password>@<cluster>.mongodb.net/pingme
 
 # JWT Secret (use a strong secret in production)
 JWT_SECRET=your-super-secret-jwt-key-here
