@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PingMe - Web Demo</title>
+    <script src="/socket.io/socket.io.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+        .container { display: flex; gap: 20px; }
+        .auth-section, .chat-section { flex: 1; border: 1px solid #ccc; padding: 20px; border-radius: 8px; }
+        .messages { height: 300px; overflow-y: auto; border: 1px solid #ddd; padding: 10px; margin-bottom: 10px; }
+        .message { margin: 5px 0; padding: 5px; border-radius: 4px; }
+        .message.sent { background: #e3f2fd; text-align: right; }
+        .message.received { background: #f3e5f5; }
+        input, button { padding: 8px; margin: 5px; }
+        .user-list { margin: 10px 0; }
+        .user { padding: 5px; margin: 2px; background: #f0f0f0; border-radius: 4px; cursor: pointer; }
+        .user.online { background: #c8e6c9; }
+        .typing { font-style: italic; color: #666; }
+        .status { margin: 10px 0; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <h1>🚀 PingMe - Web Demo</h1>
+    
+    <div class="container">
+        <!-- Authentication Section -->
+        <div class="auth-section">
+            <h3>Authentication</h3>
+            <div id="loginForm">
+                <h4>Login</h4>
+                <input type="email" id="loginEmail" placeholder="Email">
+                <input type="password" id="loginPassword" placeholder="Password">
+                <button onclick="login()">Login</button>
+                
+                <h4>Register</h4>
+                <input type="text" id="regUsername" placeholder="Username">
+                <input type="email" id="regEmail" placeholder="Email">
+                <input type="password" id="regPassword" placeholder="Password">
+                <button onclick="register()">Register</button>
+            </div>
+            
+            <div id="loggedIn" style="display:none;">
+                <div class="status" id="userStatus"></div>
+                <button onclick="logout()">Logout</button>
+                
+                <h4>Users</h4>
+                <div id="usersList" class="user-list"></div>
+            </div>
+        </div>
+        
+        <!-- Chat Section -->
+        <div class="chat-section">
+            <h3>Chat</h3>
+            <div id="chatContainer" style="display:none;">
+                <div id="chatHeader">Chat with: <span id="chatWith"></span></div>
+                <div id="messages" class="messages"></div>
+                <div id="typing" class="typing"></div>
+                <div>
+                    <input type="text" id="messageInput" placeholder="Type a message..." style="width: 70%;">
+                    <button onclick="sendMessage()">Send</button>
+                </div>
+            </div>
+            <div id="noChatSelected">Select a user to start chatting</div>
+        </div>
+    </div>
+
+    <script>
+        let socket;
+        let currentUser = null;
+        let currentChat = null;
+        let users = [];
+        let typingTimeout;
+
+        // Authentication Functions
+        async function login() {
+            const email = document.getElementById('loginEmail').value;
+            const password = document.getElementById('loginPassword').value;
+            
+            try {
+                const response = await fetch('/auth/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ email, password })
+                });
+                
+                const data = await response.json();
+                if (data.token) {
+                    localStorage.setItem('token', data.token);
+                    currentUser = data.user;
+                    showLoggedIn();
+                    connectSocket();
+                    fetchUsers();
+                } else {
+                    alert('Login failed: ' + data.message);
+                }
+            } catch (error) {
+                alert('Login error: ' + error.message);
+            }
+        }
+
+        async function register() {
+            const username = document.getElementById('regUsername').value;
+            const email = document.getElementById('regEmail').value;
+            const password = document.getElementById('regPassword').value;
+            
+            try {
+                const response = await fetch('/auth/register', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name: username, email, password })
+                });
+                
+                const data = await response.json();
+                if (data.token) {
+                    localStorage.setItem('token', data.token);
+                    currentUser = data.user;
+                    showLoggedIn();
+                    connectSocket();
+                    fetchUsers();
+                } else {
+                    alert('Registration failed: ' + data.message);
+                }
+            } catch (error) {
+                alert('Registration error: ' + error.message);
+            }
+        }
+
+        function logout() {
+            localStorage.removeItem('token');
+            currentUser = null;
+            if (socket) socket.disconnect();
+            showLoginForm();
+        }
+
+        function showLoggedIn() {
+            document.getElementById('loginForm').style.display = 'none';
+            document.getElementById('loggedIn').style.display = 'block';
+            document.getElementById('userStatus').textContent = `Logged in as: ${currentUser.name || currentUser.email}`;
+        }
+
+        function showLoginForm() {
+            document.getElementById('loginForm').style.display = 'block';
+            document.getElementById('loggedIn').style.display = 'none';
+            document.getElementById('chatContainer').style.display = 'none';
+            document.getElementById('noChatSelected').style.display = 'block';
+        }
+
+        // Socket Functions
+        function connectSocket() {
+            const token = localStorage.getItem('token');
+            socket = io('/', { auth: { token } });
+            
+            socket.on('user:online', (data) => {
+                updateUserStatus(data.userId, true);
+            });
+            
+            socket.on('user:offline', (data) => {
+                updateUserStatus(data.userId, false);
+            });
+            
+            socket.on('message:new', (message) => {
+                if (currentChat && (message.sender === currentChat.id || message.recipient === currentChat.id)) {
+                    displayMessage(message);
+                }
+            });
+            
+            socket.on('typing:start', (data) => {
+                if (currentChat && data.userId === currentChat.id) {
+                    document.getElementById('typing').textContent = `${currentChat.name} is typing...`;
+                }
+            });
+            
+            socket.on('typing:stop', () => {
+                document.getElementById('typing').textContent = '';
+            });
+        }
+
+        // User Functions
+        async function fetchUsers() {
+            try {
+                const response = await fetch('/users', {
+                    headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+                });
+                users = await response.json();
+                displayUsers();
+            } catch (error) {
+                console.error('Error fetching users:', error);
+            }
+        }
+
+        function displayUsers() {
+            const usersList = document.getElementById('usersList');
+            usersList.innerHTML = '';
+            
+            users.forEach(user => {
+                if (user.id !== currentUser.id) {
+                    const userDiv = document.createElement('div');
+                    userDiv.className = `user ${user.isOnline ? 'online' : ''}`;
+                    userDiv.textContent = `${user.name || user.email} ${user.isOnline ? '🟢' : '🔴'}`;
+                    userDiv.onclick = () => startChat(user);
+                    usersList.appendChild(userDiv);
+                }
+            });
+        }
+
+        function updateUserStatus(userId, isOnline) {
+            users = users.map(user => 
+                user.id === userId ? { ...user, isOnline } : user
+            );
+            displayUsers();
+        }
+
+        // Chat Functions
+        function startChat(user) {
+            currentChat = user;
+            document.getElementById('chatWith').textContent = user.name || user.email;
+            document.getElementById('chatContainer').style.display = 'block';
+            document.getElementById('noChatSelected').style.display = 'none';
+            document.getElementById('messages').innerHTML = '';
+            loadChatHistory();
+        }
+
+        async function loadChatHistory() {
+            // For demo purposes, we'll start with empty chat
+            // In a real app, you'd load message history here
+        }
+
+        function sendMessage() {
+            const input = document.getElementById('messageInput');
+            const message = input.value.trim();
+            
+            if (message && currentChat) {
+                const messageData = {
+                    recipient: currentChat.id,
+                    content: message,
+                    sender: currentUser.id
+                };
+                
+                socket.emit('message:send', messageData);
+                displayMessage({ ...messageData, timestamp: new Date(), sent: true });
+                input.value = '';
+            }
+        }
+
+        function displayMessage(message) {
+            const messagesDiv = document.getElementById('messages');
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${message.sent || message.sender === currentUser.id ? 'sent' : 'received'}`;
+            messageDiv.innerHTML = `
+                <div>${message.content}</div>
+                <small>${new Date(message.timestamp).toLocaleTimeString()}</small>
+            `;
+            messagesDiv.appendChild(messageDiv);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        }
+
+        // Typing indicator
+        document.getElementById('messageInput').addEventListener('keypress', function(e) {
+            if (currentChat) {
+                socket.emit('typing:start', { userId: currentChat.id });
+                clearTimeout(typingTimeout);
+                typingTimeout = setTimeout(() => {
+                    socket.emit('typing:stop', { userId: currentChat.id });
+                }, 3000);
+            }
+            
+            if (e.key === 'Enter') {
+                sendMessage();
+                socket.emit('typing:stop', { userId: currentChat.id });
+            }
+        });
+
+        // Check for existing token on load
+        window.onload = function() {
+            const token = localStorage.getItem('token');
+            if (token) {
+                // In a real app, you'd validate the token here
+                // For demo, we'll assume it's valid
+                currentUser = { id: 'demo-user', name: 'Demo User' };
+                showLoggedIn();
+                connectSocket();
+                fetchUsers();
+            }
+        };
+    </script>
+</body>
+</html>

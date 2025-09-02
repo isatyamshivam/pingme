@@ -1,4 +1,4 @@
-package com.pingmetemp
+package com.pingme
 
 import android.app.Application
 import com.facebook.react.PackageList
